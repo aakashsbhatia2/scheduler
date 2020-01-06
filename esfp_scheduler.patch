@@ -1,0 +1,727 @@
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 887d3a7..f1ce1ea 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -2937,6 +2937,12 @@ config X86_DMA_REMAP
+ config HAVE_GENERIC_GUP
+ 	def_bool y
+ 
++menu "ESF Priority schduler"
++config SCHED_ESFP_POLICY
++	bool "enable ESFP scheduler"
++	default y
++endmenu
++
+ source "net/Kconfig"
+ 
+ source "drivers/Kconfig"
+diff --git a/fs/proc/Makefile b/fs/proc/Makefile
+index ead487e..da2b848 100644
+--- a/fs/proc/Makefile
++++ b/fs/proc/Makefile
+@@ -27,6 +27,7 @@ proc-y	+= softirqs.o
+ proc-y	+= namespaces.o
+ proc-y	+= self.o
+ proc-y	+= thread_self.o
++proc-$(CONFIG_ESFP_POLICY)	+= proc_esfp.o
+ proc-$(CONFIG_PROC_SYSCTL)	+= proc_sysctl.o
+ proc-$(CONFIG_NET)		+= proc_net.o
+ proc-$(CONFIG_PROC_KCORE)	+= kcore.o
+diff --git a/fs/proc/proc_esfp.c b/fs/proc/proc_esfp.c
+new file mode 100644
+index 00000000..e348b6b
+--- /dev/null
++++ b/fs/proc/proc_esfp.c
+@@ -0,0 +1,96 @@
++
++
++#include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/time.h>
++#include <linux/kernel.h>
++#include <linux/kernel_stat.h>
++#include <linux/fs.h>
++#include <linux/tty.h>
++#include <linux/string.h>
++#include <linux/mman.h>
++#include <linux/proc_fs.h>
++#include <linux/ioport.h>
++#include <linux/mm.h>
++#include <linux/mmzone.h>
++#include <linux/pagemap.h>
++#include <linux/swap.h>
++#include <linux/slab.h>
++#include <linux/smp.h>
++#include <linux/signal.h>
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/seq_file.h>
++#include <linux/times.h>
++#include <linux/profile.h>
++#include <linux/utsname.h>
++#include <linux/blkdev.h>
++#include <linux/hugetlb.h>
++#include <linux/jiffies.h>
++#include <linux/sysrq.h>
++#include <linux/vmalloc.h>
++#include <linux/crash_dump.h>
++#include <linux/pid_namespace.h>
++#include <asm/uaccess.h>
++#include <asm/pgtable.h>
++#include <asm/io.h>
++#include <asm/tlb.h>
++#include <asm/div64.h>
++#include "internal.h"
++#include "../../kernel/sched/sched.h"
++
++#ifdef  CONFIG_ESFP_POLICY
++#define ESFP_MAX_CURSOR_LINES_EVENTS   1
++
++static int esfp_open(struct inode *inode, struct file *file)
++{
++        return 0;
++}
++
++
++static ssize_t esfp_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
++{
++        char buffer[ESFP_MSG_SIZE];
++        unsigned int len=0,k,i;
++        struct ESFP_event_log *log=NULL;
++        buffer[0]='\0';
++        log=get_esfp_event_log();
++        if(log){
++                if(log->cursor < log->lines){
++                        k=(log->lines > (log->cursor + ESFP_MAX_CURSOR_LINES_EVENTS))?(log->cursor + ESFP_MAX_CURSOR_LINES_EVENTS):(log->lines);
++                        for(i=log->cursor; i<k;i++){
++                                len = snprintf(buffer, count, "%s%c,%llu.%09llu,%s\n",
++                                        buffer,
++                                        ESFP_EVENT_CODE(log->esfp_event[i].action),
++                                        log->esfp_event[i].timestamp / (1000 * 1000 * 1000), /* time / ns */
++                                        log->esfp_event[i].timestamp % (1000 * 1000 * 1000), /* time % ns */
++                                        log->esfp_event[i].msg);
++                        }
++                        log->cursor=k;
++                }
++                if(len) 
++                        copy_to_user(buf,buffer,len);
++
++        }
++        return len;
++}
++
++static int esfp_release(struct inode *inode, struct file *file)
++{
++        return 0;
++}
++
++static const struct file_operations proc_esfp_operations = {
++        .open           = esfp_open,
++        .read           = esfp_read,
++        .release        = esfp_release,
++};
++
++int __init proc_esfp_init(void)
++{
++	proc_create("esfp_event", 0, NULL, &proc_esfp_operations);
++        return 0;
++}
++module_init(proc_esfp_init);
++#endif
++
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 43731fe..8449850 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -498,6 +498,18 @@ struct sched_rt_entity {
+ #endif
+ } __randomize_layout;
+ 
++
++#ifdef	CONFIG_SCHED_ESFP_POLICY
++struct sched_esfp_entity {
++	unsigned int esfp_id;
++        unsigned long long esfp_start_time;
++	unsigned long long esfp_priority;
++
++	struct rb_node esfp_rb_node;
++	struct list_head esfp_list_node;
++};
++#endif	/* CONFIG_SCHED_ESFP_POLICY */
++
+ struct sched_dl_entity {
+ 	struct rb_node			rb_node;
+ 
+@@ -644,6 +656,10 @@ struct task_struct {
+ 	const struct sched_class	*sched_class;
+ 	struct sched_entity		se;
+ 	struct sched_rt_entity		rt;
++#ifdef CONFIG_SCHED_ESFP_POLICY
++	struct sched_esfp_entity	esfp;
++#endif
++
+ #ifdef CONFIG_CGROUP_SCHED
+ 	struct task_group		*sched_task_group;
+ #endif
+diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
+index 22627f8..306579c 100644
+--- a/include/uapi/linux/sched.h
++++ b/include/uapi/linux/sched.h
+@@ -41,6 +41,8 @@
+ #define SCHED_IDLE		5
+ #define SCHED_DEADLINE		6
+ 
++#define SCHED_ESFP		9
++
+ /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
+ #define SCHED_RESET_ON_FORK     0x40000000
+ 
+diff --git a/include/uapi/linux/sched/types.h b/include/uapi/linux/sched/types.h
+index 10fbb80..0328ee6 100644
+--- a/include/uapi/linux/sched/types.h
++++ b/include/uapi/linux/sched/types.h
+@@ -70,6 +70,11 @@ struct sched_attr {
+ 	__u64 sched_runtime;
+ 	__u64 sched_deadline;
+ 	__u64 sched_period;
++
++	/* SCHED_ESFP */
++	__u64 esfp_priority;
++	__u64 esfp_start_time;
++	__u64 esfp_id;
+ };
+ 
+ #endif /* _UAPI_LINUX_SCHED_TYPES_H */
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index d9a02b3..a6d5bf7 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -18,6 +18,7 @@ endif
+ 
+ obj-y += core.o loadavg.o clock.o cputime.o
+ obj-y += idle.o fair.o rt.o deadline.o
++obj-y += sched_esfp.o
+ obj-y += wait.o wait_bit.o swait.o completion.o
+ 
+ obj-$(CONFIG_SMP) += cpupri.o cpudeadline.o topology.o stop_task.o
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index fe365c9..6f8fbc8 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -3416,6 +3416,12 @@ static void __sched notrace __schedule(bool preempt)
+ 	struct rq *rq;
+ 	int cpu;
+ 
++#ifdef  CONFIG_SCHED_ESFP_POLICY
++/* Buffer for esfp to spritnf messages for event log */
++        char msg[ESFP_MSG_SIZE];
++#endif
++
++
+ 	cpu = smp_processor_id();
+ 	rq = cpu_rq(cpu);
+ 	prev = rq->curr;
+@@ -3476,6 +3482,18 @@ static void __sched notrace __schedule(bool preempt)
+ 	clear_tsk_need_resched(prev);
+ 	clear_preempt_need_resched();
+ 
++#ifdef  CONFIG_SCHED_ESFP_POLICY
++/* If either task involved in schedule() is a esfp task, log context_switch */
++        if(prev->policy==SCHED_ESFP || next->policy==SCHED_ESFP){
++		int prev_cid = prev->policy==SCHED_ESFP?prev->esfp.esfp_id:-1;
++		int next_cid = next->policy==SCHED_ESFP?next->esfp.esfp_id:-1;
++
++		snprintf(msg,ESFP_MSG_SIZE,"prev->(cid%d:pid%d),next->(cid%d:pid%d)",
++				prev_cid,prev->pid,next_cid,next->pid);
++                register_esfp_event(sched_clock(), msg, ESFP_CONTEXT_SWITCH);
++        }
++#endif
++
+ 	if (likely(prev != next)) {
+ 		rq->nr_switches++;
+ 		rq->curr = next;
+@@ -4087,7 +4105,12 @@ static void __setscheduler_params(struct task_struct *p,
+ 
+ 	p->policy = policy;
+ 
+-	if (dl_policy(policy))
++	if (policy == SCHED_ESFP) {
++		p->esfp.esfp_id = attr->esfp_id;
++		p->esfp.esfp_start_time = attr->esfp_start_time;
++		p->esfp.esfp_priority = attr->esfp_priority;
++		/* Don't initialize list or rb tree node */
++	} else if (dl_policy(policy))
+ 		__setparam_dl(p, attr);
+ 	else if (fair_policy(policy))
+ 		p->static_prio = NICE_TO_PRIO(attr->sched_nice);
+@@ -4116,7 +4139,9 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
+ 	if (keep_boost)
+ 		p->prio = rt_effective_prio(p, p->prio);
+ 
+-	if (dl_prio(p->prio))
++	if (p->policy == SCHED_ESFP) /* Normally scheduler determined by prio, esfp is exception*/
++		p->sched_class = &esfp_sched_class;
++	else if (dl_prio(p->prio))
+ 		p->sched_class = &dl_sched_class;
+ 	else if (rt_prio(p->prio))
+ 		p->sched_class = &rt_sched_class;
+@@ -6024,6 +6049,11 @@ void __init sched_init(void)
+ 		init_cfs_rq(&rq->cfs);
+ 		init_rt_rq(&rq->rt);
+ 		init_dl_rq(&rq->dl);
++
++#ifdef CONFIG_SCHED_ESFP_POLICY
++		init_esfp_rq(&rq->esfp);
++#endif /* CONFIG_SCHED_ESFP_POLICY */
++
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ 		root_task_group.shares = ROOT_TASK_GROUP_LOAD;
+ 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
+@@ -6112,6 +6142,10 @@ void __init sched_init(void)
+ 
+ 	init_schedstats();
+ 
++#ifdef CONFIG_SCHED_ESFP_POLICY
++	init_esfp_event_log();
++#endif /* CONFIG_SCHED_ESFP_POLICY */
++
+ 	scheduler_running = 1;
+ }
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index c7742dc..858b01c 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -173,7 +173,7 @@ static inline int dl_policy(int policy)
+ static inline bool valid_policy(int policy)
+ {
+ 	return idle_policy(policy) || fair_policy(policy) ||
+-		rt_policy(policy) || dl_policy(policy);
++		rt_policy(policy) || dl_policy(policy) || policy == SCHED_ESFP;
+ }
+ 
+ static inline int task_has_rt_policy(struct task_struct *p)
+@@ -730,6 +730,16 @@ struct root_domain {
+ 	unsigned long		max_cpu_capacity;
+ };
+ 
++
++
++#ifdef CONFIG_SCHED_ESFP_POLICY
++struct esfp_rq {
++	struct rb_root esfp_rb_root;
++	struct list_head esfp_list_head;
++	atomic_t nr_running;
++};
++#endif /* CONFIG_SCHED_ESFP_POLICY */
++
+ extern struct root_domain def_root_domain;
+ extern struct mutex sched_domains_mutex;
+ 
+@@ -785,6 +795,10 @@ struct rq {
+ 	struct rt_rq		rt;
+ 	struct dl_rq		dl;
+ 
++#ifdef CONFIG_SCHED_ESFP_POLICY
++	struct esfp_rq		esfp;
++#endif /* CONFIG_SCHED_ESFP_POLICY */
++
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ 	/* list of leaf cfs_rq on this CPU: */
+ 	struct list_head	leaf_cfs_rq_list;
+@@ -1547,11 +1561,7 @@ static inline void set_curr_task(struct rq *rq, struct task_struct *curr)
+ 	curr->sched_class->set_curr_task(rq);
+ }
+ 
+-#ifdef CONFIG_SMP
+-#define sched_class_highest (&stop_sched_class)
+-#else
+-#define sched_class_highest (&dl_sched_class)
+-#endif
++#define sched_class_highest (&esfp_sched_class)
+ #define for_each_class(class) \
+    for (class = sched_class_highest; class; class = class->next)
+ 
+@@ -1561,6 +1571,10 @@ extern const struct sched_class rt_sched_class;
+ extern const struct sched_class fair_sched_class;
+ extern const struct sched_class idle_sched_class;
+ 
++#ifdef CONFIG_SCHED_ESFP_POLICY
++extern const struct sched_class esfp_sched_class;
++#endif /* CONFIG_SCHED_ESFP_POLICY */
++
+ 
+ #ifdef CONFIG_SMP
+ 
+@@ -2053,6 +2067,9 @@ print_numa_stats(struct seq_file *m, int node, unsigned long tsf,
+ extern void init_cfs_rq(struct cfs_rq *cfs_rq);
+ extern void init_rt_rq(struct rt_rq *rt_rq);
+ extern void init_dl_rq(struct dl_rq *dl_rq);
++#ifdef CONFIG_SCHED_ESFP_POLICY
++extern void init_esfp_rq(struct esfp_rq *esfp_rq);
++#endif /* CONFIG_SCHED_ESFP_POLICY */
+ 
+ extern void cfs_bandwidth_usage_inc(void);
+ extern void cfs_bandwidth_usage_dec(void);
+@@ -2194,3 +2211,36 @@ static inline unsigned long cpu_util_cfs(struct rq *rq)
+ 	return util;
+ }
+ #endif
++
++
++
++#ifdef	CONFIG_SCHED_ESFP_POLICY
++
++/* Rolls its own logging system for events related to ESFP */
++#define ESFP_MSG_SIZE		400
++#define ESFP_MAX_EVENT_LINES	10000
++
++#define ESFP_ENQUEUE		1
++#define ESFP_DEQUEUE		2
++#define	ESFP_CONTEXT_SWITCH	3
++#define	ESFP_MSG		4
++
++#define ESFP_EVENT_CODE(i) ("?EDSM?????"[i])
++
++struct esfp_event{
++	int action;
++	unsigned long long timestamp;
++	char msg[ESFP_MSG_SIZE];
++};
++
++struct esfp_event_log{
++	struct esfp_event esfp_event[ESFP_MAX_EVENT_LINES];
++	unsigned long lines;
++	unsigned long cursor;
++};
++
++void init_esfp_event_log(void);
++struct esfp_event_log * get_esfp_event_log(void);
++void register_esfp_event(unsigned long long t, char *m, int a);
++
++#endif
+diff --git a/kernel/sched/sched_esfp.c b/kernel/sched/sched_esfp.c
+new file mode 100644
+index 00000000..8697f80
+--- /dev/null
++++ b/kernel/sched/sched_esfp.c
+@@ -0,0 +1,312 @@
++#include "sched.h"
++
++/* =========================================================================
++ *                       Log Functions Implementation
++ */
++
++struct esfp_event_log esfp_event_log;
++
++struct esfp_event_log * get_esfp_event_log(void)
++{
++	return &esfp_event_log;
++}
++void init_esfp_event_log(void)
++{
++	char msg[ESFP_MSG_SIZE];
++	esfp_event_log.lines=esfp_event_log.cursor=0;
++	snprintf(msg,ESFP_MSG_SIZE,"init_esfp_event_log:(%lu:%lu)", esfp_event_log.lines, esfp_event_log.cursor);
++	register_esfp_event(sched_clock(), msg, ESFP_MSG);
++
++}
++/* Logs an event if there's room */
++void register_esfp_event(unsigned long long t, char *m, int a)
++{
++
++	if(esfp_event_log.lines < ESFP_MAX_EVENT_LINES){
++		esfp_event_log.esfp_event[esfp_event_log.lines].action=a;
++		esfp_event_log.esfp_event[esfp_event_log.lines].timestamp=t;
++		strncpy(esfp_event_log.esfp_event[esfp_event_log.lines].msg,m,ESFP_MSG_SIZE-1);
++		esfp_event_log.lines++;
++		
++		printk(KERN_ALERT "cas_event: %s\n", m);
++	}
++	else{
++		printk(KERN_ALERT "ERROR register_esfp_event full\n");
++	}
++
++}
++
++
++/* =========================================================================
++ *             Funcs for esfp tasks, and lists
++ */ 
++
++void init_esfp_rq(struct esfp_rq *esfp_rq)
++{
++	esfp_rq->esfp_rb_root=RB_ROOT;
++	INIT_LIST_HEAD(&esfp_rq->esfp_list_head);
++	atomic_set(&esfp_rq->nr_running,0);
++}
++
++/* =========================================================================
++ *                       rb_trees of casio_tasks
++ */ 
++
++void remove_esfp_task_rb_tree(struct esfp_rq *rq, struct sched_esfp_entity *p)
++{
++	rb_erase(&(p->esfp_rb_node),&(rq->esfp_rb_root));
++	p->esfp_rb_node.rb_left=p->esfp_rb_node.rb_right=NULL;
++}
++
++void insert_esfp_task_rb_tree(struct esfp_rq *rq, struct sched_esfp_entity *p)
++{
++	struct rb_node **node=NULL;
++	struct rb_node *parent=NULL;
++	struct sched_esfp_entity *entry=NULL;
++	node=&rq->esfp_rb_root.rb_node;
++	while(*node!=NULL){
++		parent=*node;
++		entry=rb_entry(parent, struct sched_esfp_entity,esfp_rb_node);
++		if(entry){
++			if(p->esfp_start_time < entry ->esfp_start_time){
++                                node = &parent->rb_left;
++                        }
++			else if(p->esfp_start_time > entry ->esfp_start_time){
++                                node = &parent->rb_right;
++                        }
++                        else{   
++                                if(p->esfp_priority < entry->esfp_priority){
++				node = &parent->rb_left;
++				}
++				else{
++				node = &parent->rb_right;
++				}
++                        }
++                }
++	}
++	rb_link_node(&p->esfp_rb_node,parent,node);
++	rb_insert_color(&p->esfp_rb_node,&rq->esfp_rb_root);
++}
++struct sched_esfp_entity * earliest_deadline_esfp_task_rb_tree(struct esfp_rq *rq)
++{
++	struct rb_node *node=NULL;
++	struct sched_esfp_entity *p=NULL;
++	node=rq->esfp_rb_root.rb_node;
++	if(node==NULL)
++		return NULL;
++
++	while(node->rb_left!=NULL){
++		node=node->rb_left;
++	}
++	p=rb_entry(node, struct sched_esfp_entity,esfp_rb_node);
++	return p;
++}
++
++/* If curr task is priority < ESFP, or some other task has an earlier deadline, preempt */
++static void check_preempt_curr_esfp(struct rq *rq, struct task_struct *p, int flags)
++{
++
++	printk(KERN_ALERT "casio: check_preempt_currl\n");
++}
++
++/* =========================================================================
++ *                  Implementation of Scheduler class functions
++ */
++
++/* Returns next task struct to be scheduled (Earliest deadline CASIO task) */
++static struct task_struct *pick_next_task_esfp(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
++{
++	//printk(KERN_ALERT "esfp: pick_next_task\n");
++	
++	struct sched_esfp_entity *ce=NULL;
++	struct task_struct *p=NULL;
++	ce = earliest_deadline_esfp_task_rb_tree(&rq->esfp);
++	if(ce){
++		p = container_of(ce, struct task_struct, esfp);
++		printk(KERN_ALERT "esfp: pick_next_task: picked cid%d, pid%d\n", ce->esfp_id, p->pid );
++		return p;
++	}
++	
++	return NULL;
++}
++
++
++/* Called when esfp task becomes runnable */
++/* Finds corresponding casio_task in the given rq */
++/* inserts it into the rb-tree, updates deadline */
++/* If task already in the structure, */
++static void enqueue_task_esfp(struct rq *rq, struct task_struct *p, int flags)
++{
++	struct sched_esfp_entity *ce;
++	char msg[ESFP_MSG_SIZE];
++
++	if(p){
++		ce=&(p->esfp);
++
++		ce->esfp_start_time = 0 + ce->esfp_start_time;
++		insert_esfp_task_rb_tree(&rq->esfp, ce);
++		atomic_inc(&rq->esfp.nr_running);
++		snprintf(msg,ESFP_MSG_SIZE,"ENQ(cid%d:pid%d:dl%llu.%09llu)",ce->esfp_id,p->pid,
++			ce->esfp_start_time / 1000000000, ce->esfp_start_time % 1000000000);
++		register_esfp_event(sched_clock(), msg, ESFP_ENQUEUE);
++	}
++}
++
++/* Called when casio task unrunnable */
++/* Finds which rq's casio list it's in */
++/* Removes it from rb tree */
++/* If task exited, destroy the casio_task */
++static void dequeue_task_esfp(struct rq *rq, struct task_struct *p, int sleep)
++{
++	struct sched_esfp_entity *ce;
++	char msg[ESFP_MSG_SIZE];
++	if(p){
++		ce = &(p->esfp);
++		
++		if(1){
++			snprintf(msg,ESFP_MSG_SIZE,"DEQ(cid%d:pid%d:dl%llu.%09llu)",ce->esfp_id,p->pid,
++				ce->esfp_start_time / 1000000000, ce->esfp_start_time % 1000000000);
++			register_esfp_event(sched_clock(), msg, ESFP_DEQUEUE);
++
++			remove_esfp_task_rb_tree(&rq->esfp, ce);
++
++			atomic_dec(&rq->esfp.nr_running);
++
++		}
++		else{
++			printk(KERN_ALERT "error in dequeue_task_esfp\n");
++		}
++	}
++
++}
++
++static void put_prev_task_esfp(struct rq *rq, struct task_struct *prev) { }
++
++static void task_tick_esfp(struct rq *rq, struct task_struct *p, int queued)
++{
++	printk(KERN_ALERT "esfp: task_tick cid%d, pid%d\n", p->esfp.esfp_id, p->pid);
++	//check_preempt_curr_esfp(rq, p);
++}
++
++static void set_curr_task_esfp(struct rq *rq) { }
++
++
++/*
++ * When switching a task to RT, we may overload the runqueue
++ * with RT tasks. In this case we try to push them off to
++ * other runqueues.
++ */
++static void switched_to_esfp(struct rq *rq, struct task_struct *p)
++{
++	printk(KERN_ALERT "esfp: switched_to\n");
++        /*
++         * If we are already running, then there's nothing
++         * that needs to be done. But if we are not running
++         * we may need to preempt the current running task.
++         * If that current running task is also an RT task
++         * then see if we can move to another run queue.
++         */
++}
++
++
++unsigned int get_rr_interval_esfp(struct rq *rq, struct task_struct *task)
++{
++	printk(KERN_ALERT "esfp: get_rr_interval\n");
++	return 0;
++}
++
++static void yield_task_esfp(struct rq *rq) { 
++	printk(KERN_ALERT "esfp: yield_task\n");
++}
++
++
++/*
++ * Priority of the task has changed. This may cause
++ * us to initiate a push or pull.
++ */
++static void prio_changed_esfp(struct rq *rq, struct task_struct *p, int oldprio) { 
++	printk(KERN_ALERT "esfp: prio_changed\n");
++}
++
++static int select_task_rq_esfp(struct task_struct *task, int task_cpu, int sd_flag, int flags)
++{
++	printk(KERN_ALERT "esfp: select_task_rq\n");
++//	struct rq *rq = task_rq(p);
++
++	if (sd_flag != SD_BALANCE_WAKE)
++		return smp_processor_id();
++
++	return task_cpu;
++}
++
++
++static void set_cpus_allowed_esfp(struct task_struct *p, const struct cpumask *new_mask) { }
++
++/* Assumes rq->lock is held */
++static void rq_online_esfp(struct rq *rq) { }
++/* Assumes rq->lock is held */
++static void rq_offline_esfp(struct rq *rq) { }
++
++// OLD static void pre_schedule_casio(struct rq *rq, struct task_struct *prev) { } 
++// OLD static void post_schedule_casio(struct rq *rq) { }
++//
++/*
++ * If we are not running and we are not going to reschedule soon, we should
++ * try to push tasks away now
++ */
++static void task_woken_esfp(struct rq *rq, struct task_struct *p)
++{
++	printk(KERN_ALERT "esfp: task_woken\n");
++}
++
++/*
++ * When switch from the rt queue, we bring ourselves to a position
++ * that we might want to pull RT tasks from other runqueues.
++ */
++static void switched_from_esfp(struct rq *rq, struct task_struct *p) { }
++
++/*
++ * Simple, special scheduling class for the per-CPU casio tasks:
++ */
++const struct sched_class esfp_sched_class = {
++/* old sched_class_highest was set to these in kernel/sched/sched.h */
++#ifdef CONFIG_SMP
++	.next 			= &stop_sched_class,
++#else
++	.next 			= &dl_sched_class,
++#endif
++	.enqueue_task		= enqueue_task_esfp,
++	.dequeue_task		= dequeue_task_esfp,
++
++	.yield_task		= yield_task_esfp,
++	.check_preempt_curr	= check_preempt_curr_esfp,
++
++	.pick_next_task		= pick_next_task_esfp,
++	.put_prev_task		= put_prev_task_esfp,
++
++#ifdef CONFIG_SMP
++	// OLD .load_balance		= load_balance_casio,
++	// OLD .move_one_task		= move_one_task_casio,
++
++	.select_task_rq		= select_task_rq_esfp,
++	
++	.task_woken		= task_woken_esfp,
++	.set_cpus_allowed       = set_cpus_allowed_esfp,
++
++	.rq_online              = rq_online_esfp,
++	.rq_offline             = rq_offline_esfp,
++	
++	// OLD .pre_schedule		= pre_schedule_casio,
++	// OLD .post_schedule		= post_schedule_casio,
++#endif
++
++	.set_curr_task          = set_curr_task_esfp,
++	.task_tick		= task_tick_esfp,
++
++	.switched_from		= switched_from_esfp,
++	.switched_to		= switched_to_esfp,
++	.prio_changed		= prio_changed_esfp,
++
++	.get_rr_interval	= get_rr_interval_esfp,
++
++};
+diff --git a/linux-4.18_casio_patch b/linux-4.18_casio_patch
+new file mode 160000
+index 00000000..4a2eae7
+--- /dev/null
++++ b/linux-4.18_casio_patch
+@@ -0,0 +1 @@
++Subproject commit 4a2eae77cdc4ba0ab8d66179669414634b201f46-dirty
